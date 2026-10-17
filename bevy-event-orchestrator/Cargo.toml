@@ -2,6 +2,15 @@
 name = "bevy-event-orchestrator"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.97.1"
+license = "MIT OR Apache-2.0"
+description = "Condition-driven scripted events with cooldowns and seeded randomness for Bevy"
+readme = "README.md"
+repository = "https://github.com/optiummusic/Bevy-Event-Orchestrator"
+documentation = "https://docs.rs/bevy-event-orchestrator"
+keywords = ["bevy", "gamedev", "events", "scripting", "ecs"]
+categories = ["game-development"]
+include = ["src/*.rs", "examples/**", "Cargo.toml", "Cargo.lock", "README.md", "CHANGELOG.md", "RELEASING.md", "scripts/check.sh", "LICENSE*"]
 
 [dependencies]
 bevy = { version = "0.20", default-features = false }

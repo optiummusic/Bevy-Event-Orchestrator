@@ -1,12 +1,15 @@
-mod event;
-mod slot;
-mod bus;
-mod plugin;
+#![doc = include_str!("../README.md")]
+#![warn(missing_docs)]
 
-pub use event::*;
-pub use slot::*;
+mod bus;
+mod event;
+mod plugin;
+mod slot;
+
 pub use bus::*;
+pub use event::*;
 pub use plugin::*;
+pub use slot::*;
 
 #[cfg(test)]
 mod tests;

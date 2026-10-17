@@ -8,9 +8,13 @@
 //! These tests assume `is_ready(&mut self, ...)`, and that actions issued during
 //! `tick()` are applied at the beginning of the following `tick()`.
 
-use std::any::Any;
+use std::{any::Any, time::Duration};
 
-use bevy::{app::App, ecs::world::World, prelude::Resource};
+use bevy::{
+    app::App,
+    ecs::world::World,
+    prelude::{Resource, Time},
+};
 
 use crate::{EventBus, EventBusPlugin, EventSlot, ScriptedEvent};
 
@@ -23,6 +27,7 @@ struct TestState {
 fn test_world() -> World {
     let mut world = World::new();
     world.insert_resource(TestState::default());
+    world.insert_resource(Time::<()>::default());
     world
 }
 
@@ -302,7 +307,8 @@ fn deletion_requested_during_execution_applies_on_next_tick() {
 #[test]
 fn plugin_ticks_bus_on_app_update() {
     let mut app = App::new();
-    app.add_plugins(EventBusPlugin)
+    app.insert_resource(Time::<()>::default())
+        .add_plugins(EventBusPlugin)
         .insert_resource(TestState::default());
 
     app.world_mut()
@@ -314,4 +320,170 @@ fn plugin_ticks_bus_on_app_update() {
 
     app.update();
     assert_eq!(log(app.world()), &["plugin"]);
+}
+
+fn advance(world: &mut World, seconds: f64) {
+    world
+        .resource_mut::<Time>()
+        .advance_by(Duration::from_secs_f64(seconds));
+}
+
+fn repeating(event: impl ScriptedEvent, cooldown: f64, chance: f32) -> EventSlot {
+    EventSlot::repeatable_chance(Box::new(event), cooldown, chance)
+}
+
+#[test]
+fn repeatable_runs_again_only_after_cooldown() {
+    let mut world = test_world();
+    let mut bus = EventBus::with_seed(42);
+    bus.add_event(EventSlot::repeatable(Box::new(Record("repeat")), 10.0));
+    bus.tick(&mut world);
+    advance(&mut world, 9.0);
+    bus.tick(&mut world);
+    assert_eq!(log(&world), &["repeat"]);
+    advance(&mut world, 1.0);
+    bus.tick(&mut world);
+    advance(&mut world, 10.0);
+    bus.tick(&mut world);
+    assert_eq!(log(&world), &["repeat", "repeat", "repeat"]);
+}
+
+#[test]
+fn zero_chance_never_executes() {
+    let mut world = test_world();
+    let mut bus = EventBus::with_seed(42);
+    bus.add_event(repeating(Record("never"), 10.0, 0.0));
+    for _ in 0..100 {
+        bus.tick(&mut world);
+        advance(&mut world, 10.0);
+    }
+    assert!(log(&world).is_empty());
+}
+
+#[test]
+fn certain_chance_executes_on_every_allowed_check() {
+    let mut world = test_world();
+    let mut bus = EventBus::with_seed(42);
+    bus.add_event(repeating(Record("always"), 10.0, 1.0));
+    for expected in 1..=10 {
+        bus.tick(&mut world);
+        assert_eq!(log(&world).len(), expected);
+        bus.tick(&mut world);
+        assert_eq!(log(&world).len(), expected);
+        advance(&mut world, 10.0);
+    }
+}
+
+fn seeded_scenario(seed: u64) -> Vec<Vec<&'static str>> {
+    let mut world = test_world();
+    let mut bus = EventBus::with_seed(seed);
+    bus.add_event(repeating(Record("a"), 2.0, 0.25));
+    bus.add_event(repeating(Record("b"), 3.0, 0.5));
+    (0..100)
+        .map(|_| {
+            bus.tick(&mut world);
+            advance(&mut world, 1.0);
+            std::mem::take(&mut world.resource_mut::<TestState>().log)
+        })
+        .collect()
+}
+
+#[test]
+fn same_seed_reproduces_the_whole_scenario() {
+    let first = seeded_scenario(42);
+    assert_eq!(first, seeded_scenario(42));
+    assert!(first.iter().flatten().count() > 2);
+    assert_ne!(first, seeded_scenario(43));
+}
+
+#[test]
+fn failed_roll_starts_cooldown_before_next_readiness_check() {
+    let mut world = test_world();
+    let mut bus = EventBus::with_seed(42);
+    // This event panics if readiness is checked twice.
+    bus.add_event(repeating(CheckOnce(false), 10.0, 0.0));
+    bus.tick(&mut world);
+    advance(&mut world, 1.0);
+    bus.tick(&mut world);
+    assert!(log(&world).is_empty());
+}
+
+struct CheckOnce(bool);
+impl ScriptedEvent for CheckOnce {
+    fn is_ready(&mut self, _: &EventBus, _: &World) -> bool {
+        assert!(!self.0, "readiness must not be checked during cooldown");
+        self.0 = true;
+        true
+    }
+    fn execute(&self, _: &mut EventBus, _: &mut World) {
+        panic!("zero chance event must not execute");
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[test]
+fn not_ready_does_not_start_cooldown() {
+    let mut world = test_world();
+    let mut bus = EventBus::with_seed(42);
+    bus.add_event(repeating(ReadyAtIteration(1), 10.0, 1.0));
+    bus.tick(&mut world);
+    advance(&mut world, 1.0);
+    world.resource_mut::<TestState>().iteration = 1;
+    bus.tick(&mut world);
+    assert_eq!(log(&world), &["ready"]);
+    advance(&mut world, 10.0);
+    bus.tick(&mut world);
+    assert_eq!(log(&world), &["ready", "ready"]);
+}
+
+#[test]
+fn failed_random_roll_waits_until_the_next_interval() {
+    use rand::{RngExt, SeedableRng, rngs::StdRng};
+    // Find a failure followed by success without pinning StdRng's algorithm.
+    let seed = (0..10_000)
+        .find(|&seed| {
+            let mut rng = StdRng::seed_from_u64(seed);
+            rng.random::<f32>() >= 0.5 && rng.random::<f32>() < 0.5
+        })
+        .expect("a seed with a failed then successful roll");
+    let mut world = test_world();
+    let mut bus = EventBus::with_seed(seed);
+    bus.add_event(repeating(Record("rolled"), 10.0, 0.5));
+    bus.tick(&mut world);
+    assert!(log(&world).is_empty());
+    advance(&mut world, 1.0);
+    bus.tick(&mut world);
+    assert!(log(&world).is_empty());
+    advance(&mut world, 9.0);
+    bus.tick(&mut world);
+    assert_eq!(log(&world), &["rolled"]);
+}
+
+#[test]
+fn plugin_respects_virtual_time_pause() {
+    use bevy::time::{TimePlugin, TimeUpdateStrategy, Virtual};
+    let mut app = App::new();
+    app.add_plugins((TimePlugin, EventBusPlugin))
+        .insert_resource(TestState::default())
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs(1)));
+    app.world_mut()
+        .resource_mut::<Time<Virtual>>()
+        .set_max_delta(Duration::from_secs(1));
+    app.world_mut()
+        .resource_mut::<EventBus>()
+        .add_event(EventSlot::repeatable(Box::new(Record("virtual")), 2.0));
+    app.update();
+    assert_eq!(log(app.world()).len(), 1);
+    app.world_mut().resource_mut::<Time<Virtual>>().pause();
+    for _ in 0..5 {
+        app.update();
+    }
+    assert_eq!(log(app.world()).len(), 1);
+    app.world_mut().resource_mut::<Time<Virtual>>().unpause();
+    app.update();
+    assert_eq!(log(app.world()).len(), 1);
+    app.update();
+    assert_eq!(log(app.world()).len(), 2);
 }

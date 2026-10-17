@@ -1,0 +1,3 @@
+/target
+bevy-event-orchestrator/target/*
+src/*

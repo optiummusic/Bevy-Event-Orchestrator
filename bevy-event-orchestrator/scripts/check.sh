@@ -6,4 +6,6 @@ cargo fmt --check
 cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
-cargo run --locked --example basic
+cargo run --locked --example examples -- rescue
+cargo run --locked --example examples -- leave
+cargo run --locked --example examples -- fail

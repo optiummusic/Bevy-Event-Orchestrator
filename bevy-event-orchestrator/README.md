@@ -1,10 +1,60 @@
 # Bevy Event Orchestrator
 
-Condition-driven scripted events for Bevy: one-shot actions, repeatable actions,
-cooldowns, and probability checks with a seedable random generator.
+Build a game scenario as a chain of events. Each event waits for its own world
+condition, performs an action, and registers what happens next with
+`bus.add_event()` inside `execute()`.
 
-Useful for encounter directors, quest conditions, ambient events, and simulation
-rules. Each event owns its readiness logic and can queue further events.
+A single initial event can grow into an ambush, parallel objectives, a player
+choice, a reward, and an epilogue. Repeatable events add cooldowns and seeded
+probability checks to the same chain.
+
+## Play the caravan encounter
+
+The complete runnable scenario is in [`examples/examples.rs`](examples/examples.rs).
+It runs without a window and prints a timestamped story:
+
+```sh
+cargo run --example examples -- rescue
+cargo run --example examples -- leave
+cargo run --example examples -- fail
+```
+
+Only `EnterCanyon` is registered at startup. Everything below it is registered
+by another event's `execute()`:
+
+```text
+EnterCanyon — wait for the player to enter
+  └─ add Ambush — wait two game-time seconds
+       ├─ add Reinforcements — 50% chance every 2s, at most two arrivals
+       ├─ add BattleWon — wait for zero enemies before the deadline
+       │    └─ add ChooseRoute
+       │         ├─ rescue: add FreePrisoner + TakeSupplies + Reward
+       │         │            └─ Reward waits for BOTH objectives → 150 gold
+       │         └─ leave:  add TakeSupplies + Reward
+       │                      └─ Reward waits for supplies → 50 gold
+       │                         └─ add Epilogue
+       └─ add CaravanLost — deadline reached while battle is active
+            └─ add Epilogue — failure, no reward
+```
+
+Both successful routes reach the epilogue through `Reward`. Victory and failure
+are mutually exclusive: victory requires time strictly before the deadline,
+while failure requires the deadline to have elapsed. The losing watcher and
+reinforcements retire through `is_dead()` when the battle ends.
+
+The rescue route demonstrates a **join**: freeing the prisoner and recovering
+supplies run independently, and the reward waits for both world conditions.
+It does not depend on the bus visiting those events in a particular order.
+
+A separate Bevy system simulates movement and combat. It never registers an
+event or advances a quest stage. In a real game, replace it with your movement,
+combat, and player-input systems. The command-line argument selects the player's
+choice ahead of time for this demonstration.
+
+Each run uses seed 42 and advances virtual time manually, one second per update.
+Forty updates finish immediately without sleeping; assertions check the selected
+outcome, reward, and exactly one epilogue. Exact reinforcement rolls can change
+between RNG versions, but the scenario remains bounded and all routes finish.
 
 ## Compatibility
 
@@ -27,7 +77,11 @@ bevy-event-orchestrator = "0.1"
 
 Before publication, use a local path to this crate instead of the version.
 
-## Quick start
+## The core pattern: execute, then add the next event
+
+This small executable example isolates the same transition used throughout the
+caravan scenario. The reward is created by the quest event, not pre-registered
+by the application:
 
 ```rust
 use std::any::Any;
@@ -35,36 +89,48 @@ use bevy::prelude::*;
 use bevy_event_orchestrator::{EventBus, EventBusPlugin, EventSlot, ScriptedEvent};
 
 #[derive(Resource, Default)]
-struct Score(u32);
+struct Gold(u32);
 
-struct AwardPoint;
+struct CompleteQuest;
+impl ScriptedEvent for CompleteQuest {
+    fn execute(&self, bus: &mut EventBus, _world: &mut World) {
+        // Choose the next event here, using the current world state if needed.
+        bus.add_event(EventSlot::once(Box::new(GrantReward { amount: 150 })));
+    }
 
-impl ScriptedEvent for AwardPoint {
+    fn as_any(&self) -> &dyn Any { self }
+}
+
+struct GrantReward { amount: u32 }
+impl ScriptedEvent for GrantReward {
     fn execute(&self, _bus: &mut EventBus, world: &mut World) {
-        world.resource_mut::<Score>().0 += 1;
+        world.resource_mut::<Gold>().0 += self.amount;
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
+    fn as_any(&self) -> &dyn Any { self }
 }
 
 let mut app = App::new();
 app.add_plugins(MinimalPlugins)
     .insert_resource(EventBus::with_seed(42))
     .add_plugins(EventBusPlugin)
-    .init_resource::<Score>();
+    .init_resource::<Gold>();
 
-app.world_mut()
-    .resource_mut::<EventBus>()
-    .add_event(EventSlot::once(Box::new(AwardPoint)));
+app.world_mut().resource_mut::<EventBus>()
+    .add_event(EventSlot::once(Box::new(CompleteQuest)));
 
-app.update();
-assert_eq!(app.world().resource::<Score>().0, 1);
+app.update(); // CompleteQuest runs and queues GrantReward.
+assert_eq!(app.world().resource::<Gold>().0, 0);
+app.update(); // GrantReward becomes eligible and runs.
+assert_eq!(app.world().resource::<Gold>().0, 150);
+app.update(); // Both one-shot events are gone.
+assert_eq!(app.world().resource::<Gold>().0, 150);
 ```
 
-Run the standalone example with `cargo run --example basic`.
-In a game, use `DefaultPlugins` and `app.run()` as usual.
+Override `is_ready()` to wait for a world condition or a deadline, as the caravan
+example does. A queued successor is first checked on the next tick; it can then
+wait as long as necessary. Events added during execution do not recursively
+execute in the same tick.
 
 ## Repeated events
 
@@ -132,7 +198,9 @@ cargo fmt --check
 cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
-cargo run --locked --example basic
+cargo run --locked --example examples -- rescue
+cargo run --locked --example examples -- leave
+cargo run --locked --example examples -- fail
 ```
 
 See `RELEASING.md` for packaging and publication steps.

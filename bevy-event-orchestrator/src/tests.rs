@@ -655,3 +655,241 @@ fn membership_during_callbacks_uses_cached_concrete_type() {
         bus.tick(&mut world);
     }
 }
+
+mod combinators {
+    use super::*;
+    use crate::{After, ScriptedEventExt};
+
+    #[test]
+    fn delay_starts_on_first_readiness_check_and_includes_boundary() {
+        let mut world = test_world();
+        let mut bus = EventBus::with_seed(42);
+        bus.add_event(once(Record("delayed").after(5.0)));
+        advance(&mut world, 100.0);
+        bus.tick(&mut world);
+        advance(&mut world, 4.0);
+        bus.tick(&mut world);
+        assert!(log(&world).is_empty());
+        advance(&mut world, 1.0);
+        bus.tick(&mut world);
+        assert_eq!(log(&world), &["delayed"]);
+        bus.tick(&mut world);
+        assert_eq!(log(&world), &["delayed"]);
+    }
+
+    #[test]
+    fn after_short_circuits_then_preserves_mutable_inner_readiness() {
+        let mut world = test_world();
+        let mut bus = EventBus::with_seed(42);
+        bus.add_event(once(
+            ReadyAfterChecks {
+                checks: 0,
+                required: 2,
+            }
+            .after(5.0),
+        ));
+        for _ in 0..3 {
+            bus.tick(&mut world);
+        }
+        advance(&mut world, 5.0);
+        bus.tick(&mut world);
+        assert!(log(&world).is_empty());
+        bus.tick(&mut world);
+        assert_eq!(log(&world), &["counted"]);
+    }
+
+    #[test]
+    fn when_short_circuits_then_preserves_inner_readiness() {
+        let mut world = test_world();
+        let mut bus = EventBus::with_seed(42);
+        let threshold = 2;
+        bus.add_event(once(
+            ReadyAfterChecks {
+                checks: 0,
+                required: 2,
+            }
+            .when(move |_, w| w.resource::<TestState>().iteration >= threshold),
+        ));
+        for _ in 0..3 {
+            bus.tick(&mut world);
+        }
+        world.resource_mut::<TestState>().iteration = 2;
+        bus.tick(&mut world);
+        assert!(log(&world).is_empty());
+        bus.tick(&mut world);
+        assert_eq!(log(&world), &["counted"]);
+    }
+
+    #[test]
+    fn composition_order_controls_when_the_timer_starts() {
+        let mut world = test_world();
+        let mut bus = EventBus::with_seed(42);
+        bus.add_event(once(
+            Record("condition first")
+                .after(5.0)
+                .when(|_, w| w.resource::<TestState>().iteration > 0),
+        ));
+        bus.add_event(once(
+            Record("timer first")
+                .when(|_, w| w.resource::<TestState>().iteration > 0)
+                .after(5.0),
+        ));
+        bus.tick(&mut world);
+        advance(&mut world, 10.0);
+        world.resource_mut::<TestState>().iteration = 1;
+        bus.tick(&mut world);
+        assert_eq!(log(&world), &["timer first"]);
+        advance(&mut world, 5.0);
+        bus.tick(&mut world);
+        assert_eq!(log(&world), &["timer first", "condition first"]);
+    }
+
+    #[test]
+    fn false_outer_condition_does_not_reset_or_pause_started_delay() {
+        let mut world = test_world();
+        let mut bus = EventBus::with_seed(42);
+        world.resource_mut::<TestState>().iteration = 1;
+        bus.add_event(once(
+            Record("ready")
+                .after(5.0)
+                .when(|_, w| w.resource::<TestState>().iteration > 0),
+        ));
+        bus.tick(&mut world);
+        world.resource_mut::<TestState>().iteration = 0;
+        advance(&mut world, 10.0);
+        bus.tick(&mut world);
+        assert!(log(&world).is_empty());
+        world.resource_mut::<TestState>().iteration = 1;
+        bus.tick(&mut world);
+        assert_eq!(log(&world), &["ready"]);
+    }
+
+    #[test]
+    fn death_bypasses_both_gates_and_predicate() {
+        let mut world = test_world();
+        let mut bus = EventBus::with_seed(42);
+        let first = bus.add_event(once(
+            AlreadyDead
+                .after(100.0)
+                .when(|_, _| panic!("dead event must not evaluate predicate")),
+        ));
+        let second = bus.add_event(once(
+            AlreadyDead
+                .when(|_, _| panic!("dead event must not evaluate predicate"))
+                .after(100.0),
+        ));
+        bus.tick(&mut world);
+        assert!(!bus.is_alive().by_id(first));
+        assert!(!bus.is_alive().by_id(second));
+    }
+
+    #[test]
+    fn wrapped_event_can_be_cancelled_by_id_before_delay_expires() {
+        let mut world = test_world();
+        let mut bus = EventBus::with_seed(42);
+        let id = bus.add_event(once(Record("cancelled").after(5.0).when(|_, _| true)));
+        bus.tick(&mut world);
+        bus.delete_event().by_id(id);
+        assert!(!bus.is_alive().by_id(id));
+        advance(&mut world, 10.0);
+        bus.tick(&mut world);
+        assert!(log(&world).is_empty());
+    }
+
+    #[test]
+    fn wrapper_type_and_name_remain_distinct_from_inner_event() {
+        let event = Record("wrapped").after(5.0);
+        assert_eq!(event.name(), std::any::type_name::<After<Record>>());
+        let mut bus = EventBus::with_seed(42);
+        let id = bus.add_event(once(event));
+        assert!(bus.is_alive().by_type::<After<Record>>());
+        assert!(!bus.is_alive().by_type::<Record>());
+        bus.delete_event().by_type::<Record>();
+        assert!(bus.is_alive().by_id(id));
+        bus.delete_event().by_type::<After<Record>>();
+        assert!(!bus.is_alive().by_id(id));
+    }
+
+    #[test]
+    fn repeating_event_uses_delay_once_then_slot_cooldown() {
+        let mut world = test_world();
+        let mut bus = EventBus::with_seed(42);
+        bus.add_event(repeating(Record("repeat").after(5.0), 2.0, 1.0));
+        bus.tick(&mut world);
+        advance(&mut world, 5.0);
+        bus.tick(&mut world);
+        advance(&mut world, 1.0);
+        bus.tick(&mut world);
+        assert_eq!(log(&world), &["repeat"]);
+        advance(&mut world, 1.0);
+        bus.tick(&mut world);
+        assert_eq!(log(&world), &["repeat", "repeat"]);
+    }
+
+    #[test]
+    fn wrapped_execute_can_enqueue_successors() {
+        let mut world = test_world();
+        let mut bus = EventBus::with_seed(42);
+        bus.add_event(once(SpawnNext.after(0.0).when(|_, _| true)));
+        bus.tick(&mut world);
+        assert_eq!(log(&world), &["first"]);
+        bus.tick(&mut world);
+        assert_eq!(log(&world), &["first", "second"]);
+    }
+
+    #[test]
+    fn delay_rejects_negative_and_nonfinite_values() {
+        for seconds in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(std::panic::catch_unwind(|| Record("invalid").after(seconds)).is_err());
+        }
+    }
+
+    struct DiesWhileWaiting;
+    impl ScriptedEvent for DiesWhileWaiting {
+        fn is_dead(&self, _: &EventBus, world: &World) -> bool {
+            world.resource::<TestState>().iteration > 0
+        }
+        fn execute(&self, _: &mut EventBus, _: &mut World) {
+            panic!("event should die before its delay elapses");
+        }
+    }
+
+    #[test]
+    fn inner_death_is_checked_while_delay_is_running() {
+        let mut world = test_world();
+        let mut bus = EventBus::with_seed(42);
+        let id = bus.add_event(once(DiesWhileWaiting.after(10.0).when(|_, _| true)));
+        bus.tick(&mut world);
+        assert!(bus.is_alive().by_id(id));
+        world.resource_mut::<TestState>().iteration = 1;
+        advance(&mut world, 1.0);
+        bus.tick(&mut world);
+        assert!(!bus.is_alive().by_id(id));
+    }
+
+    #[test]
+    fn after_respects_virtual_time_pause() {
+        use bevy::time::{TimePlugin, TimeUpdateStrategy, Virtual};
+        let mut app = App::new();
+        app.add_plugins((TimePlugin, EventBusPlugin))
+            .insert_resource(TestState::default())
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs(1)));
+        app.world_mut()
+            .resource_mut::<Time<Virtual>>()
+            .set_max_delta(Duration::from_secs(1));
+        app.world_mut()
+            .resource_mut::<EventBus>()
+            .add_event(once(Record("delayed").after(2.0)));
+        app.update();
+        app.update();
+        assert!(log(app.world()).is_empty());
+        app.world_mut().resource_mut::<Time<Virtual>>().pause();
+        for _ in 0..5 {
+            app.update();
+        }
+        assert!(log(app.world()).is_empty());
+        app.world_mut().resource_mut::<Time<Virtual>>().unpause();
+        app.update();
+        assert_eq!(log(app.world()), &["delayed"]);
+    }
+}

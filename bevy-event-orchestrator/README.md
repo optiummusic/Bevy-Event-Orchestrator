@@ -129,6 +129,77 @@ example does. A queued successor is first checked on the next tick; it can then
 wait as long as necessary. Events added during execution do not recursively
 execute in the same tick.
 
+## Compose conditions and delays
+
+Import `ScriptedEventExt` to wrap any event with `.after(seconds)` and
+`.when(predicate)`. Both preserve the original event's `is_ready()`, `is_dead()`,
+and `execute()`; successors added inside `execute()` still form normal chains.
+
+```rust
+use std::time::Duration;
+use bevy::prelude::*;
+use bevy_event_orchestrator::{EventBus, EventSlot, ScriptedEvent, ScriptedEventExt};
+
+#[derive(Resource, Default)]
+struct Night(bool);
+#[derive(Resource, Default)]
+struct Encounters(Vec<&'static str>);
+
+struct SpawnMonster(&'static str);
+impl ScriptedEvent for SpawnMonster {
+    fn execute(&self, _: &mut EventBus, world: &mut World) {
+        world.resource_mut::<Encounters>().0.push(self.0);
+    }
+}
+
+let mut world = World::new();
+world.insert_resource(Time::<()>::default());
+world.insert_resource(Night::default());
+world.insert_resource(Encounters::default());
+let mut bus = EventBus::with_seed(42);
+
+bus.add_event(EventSlot::once(
+    SpawnMonster("wait after nightfall").after(5.0)
+        .when(|_, world| world.resource::<Night>().0),
+));
+bus.add_event(EventSlot::once(
+    SpawnMonster("wait from first check")
+        .when(|_, world| world.resource::<Night>().0).after(5.0),
+));
+
+bus.tick(&mut world); // Time 0: only the outer After starts its timer.
+world.resource_mut::<Time>().advance_by(Duration::from_secs(10));
+world.resource_mut::<Night>().0 = true;
+bus.tick(&mut world); // Nightfall: the inner After starts its timer now.
+assert_eq!(world.resource::<Encounters>().0, ["wait from first check"]);
+world.resource_mut::<Time>().advance_by(Duration::from_secs(5));
+bus.tick(&mut world);
+assert_eq!(world.resource::<Encounters>().0,
+    ["wait from first check", "wait after nightfall"]);
+```
+
+The last wrapper is checked first. `event.after(5.0).when(condition)` delays
+starting its timer until the condition first allows a readiness check.
+`event.when(condition).after(5.0)` starts its timer on the first readiness check
+and evaluates the condition once the delay expires. Construction, registration,
+and waiting behind another gate do not start an inner timer.
+
+A started timer keeps its deadline even if an outer predicate becomes false.
+The predicate must be true again for execution, but it does not pause or reset
+the timer. `After` uses Bevy game time, so a paused clock does stop elapsed time.
+For repeatable slots, the delay applies only initially; later attempts follow
+the slot's cooldown. Death checks bypass all gates and can cancel the event
+before its delay expires. Delays must be finite and nonnegative; invalid values
+panic at construction. Zero delay checks inner readiness immediately.
+
+Wrappers retain their own concrete identity and default type name: use
+`delete_event().by_type::<After<SpawnMonster>>()` for an `After<SpawnMonster>`,
+not `by_type::<SpawnMonster>()`. For `When` with an anonymous closure, keep the
+`EventId` returned by `add_event()` and cancel by ID. Wrapping an event also
+changes its root RNG key; the inner event's custom `name()` is not forwarded.
+Rust type names are not guaranteed unique identifiers, particularly for closure
+types; they must not be treated as a collision-free RNG namespace.
+
 ## Repeated events
 
 Pass events by value to all three constructors; `EventSlot` handles boxing internally.

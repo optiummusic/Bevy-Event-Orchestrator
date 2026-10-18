@@ -2,6 +2,8 @@
 
 ## 0.1.1 — Unreleased
 
+- Add `After`, `When`, and `ScriptedEventExt` for composable readiness gates.
+
 - Accept concrete events by value in all `EventSlot` constructors and box them internally.
 
 - Remove the required `as_any()` method; cache concrete event type identity.

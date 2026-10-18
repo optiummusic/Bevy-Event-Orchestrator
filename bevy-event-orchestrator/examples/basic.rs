@@ -13,10 +13,6 @@ impl ScriptedEvent for AwardPoint {
     fn execute(&self, _bus: &mut EventBus, world: &mut World) {
         world.resource_mut::<Score>().0 += 1;
     }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 fn main() {

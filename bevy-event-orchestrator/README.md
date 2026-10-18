@@ -97,8 +97,6 @@ impl ScriptedEvent for CompleteQuest {
         // Choose the next event here, using the current world state if needed.
         bus.add_event(EventSlot::once(Box::new(GrantReward { amount: 150 })));
     }
-
-    fn as_any(&self) -> &dyn Any { self }
 }
 
 struct GrantReward { amount: u32 }
@@ -106,8 +104,6 @@ impl ScriptedEvent for GrantReward {
     fn execute(&self, _bus: &mut EventBus, world: &mut World) {
         world.resource_mut::<Gold>().0 += self.amount;
     }
-
-    fn as_any(&self) -> &dyn Any { self }
 }
 
 let mut app = App::new();

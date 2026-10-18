@@ -29,7 +29,4 @@ pub trait ScriptedEvent: std::any::Any + Send + Sync {
     fn is_dead(&self, bus: &EventBus, world: &World) -> bool {
         false
     }
-
-    /// Returns `self` as `Any` for concrete-type deletion.
-    fn as_any(&self) -> &dyn std::any::Any;
 }

@@ -46,10 +46,6 @@ impl ScriptedEvent for Record {
     fn execute(&self, _bus: &mut EventBus, world: &mut World) {
         world.resource_mut::<TestState>().log.push(self.0);
     }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 // Another concrete type, to check that deletion is type-specific.
@@ -58,10 +54,6 @@ struct OtherRecord;
 impl ScriptedEvent for OtherRecord {
     fn execute(&self, _bus: &mut EventBus, world: &mut World) {
         world.resource_mut::<TestState>().log.push("other");
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }
 
@@ -74,10 +66,6 @@ impl ScriptedEvent for ReadyAtIteration {
 
     fn execute(&self, _bus: &mut EventBus, world: &mut World) {
         world.resource_mut::<TestState>().log.push("ready");
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }
 
@@ -95,10 +83,6 @@ impl ScriptedEvent for ReadyAfterChecks {
     fn execute(&self, _bus: &mut EventBus, world: &mut World) {
         world.resource_mut::<TestState>().log.push("counted");
     }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 struct AlreadyDead;
@@ -115,10 +99,6 @@ impl ScriptedEvent for AlreadyDead {
     fn execute(&self, _bus: &mut EventBus, _world: &mut World) {
         panic!("a dead event must never execute");
     }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 struct SpawnNext;
@@ -127,10 +107,6 @@ impl ScriptedEvent for SpawnNext {
     fn execute(&self, bus: &mut EventBus, world: &mut World) {
         world.resource_mut::<TestState>().log.push("first");
         bus.add_event(once(Record("second")));
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }
 
@@ -141,10 +117,6 @@ impl ScriptedEvent for SpawnSelf {
     fn execute(&self, bus: &mut EventBus, world: &mut World) {
         world.resource_mut::<TestState>().log.push("self");
         bus.add_event(once(SpawnSelf));
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }
 
@@ -158,10 +130,6 @@ impl ScriptedEvent for Victim {
     fn execute(&self, _bus: &mut EventBus, world: &mut World) {
         world.resource_mut::<TestState>().log.push("victim");
     }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 struct CancelVictim;
@@ -169,10 +137,6 @@ struct CancelVictim;
 impl ScriptedEvent for CancelVictim {
     fn execute(&self, bus: &mut EventBus, _world: &mut World) {
         bus.delete_event::<Victim>();
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }
 
@@ -417,9 +381,6 @@ impl ScriptedEvent for CheckOnce {
     }
     fn execute(&self, _: &mut EventBus, _: &mut World) {
         panic!("zero chance event must not execute");
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }
 

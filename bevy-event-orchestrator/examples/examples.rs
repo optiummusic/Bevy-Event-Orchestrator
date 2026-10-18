@@ -55,10 +55,6 @@ impl ScriptedEvent for EnterCanyon {
             at: now(world) + 2.0,
         })));
     }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 struct Ambush {
@@ -88,10 +84,6 @@ impl ScriptedEvent for Ambush {
         bus.add_event(EventSlot::once(Box::new(BattleWon { deadline })));
         bus.add_event(EventSlot::once(Box::new(CaravanLost { deadline })));
     }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 struct Reinforcements;
@@ -110,10 +102,6 @@ impl ScriptedEvent for Reinforcements {
         encounter.enemies += 1;
         encounter.reinforcements += 1;
         record(world, "A bandit reinforcement joins the fight.");
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }
 
@@ -136,10 +124,6 @@ impl ScriptedEvent for BattleWon {
         bus.add_event(EventSlot::once(Box::new(ChooseRoute)));
         // Reinforcements and the losing outcome retire through is_dead().
     }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 struct CaravanLost {
@@ -160,10 +144,6 @@ impl ScriptedEvent for CaravanLost {
         encounter.failed = true;
         record(world, "Too late. The caravan is lost; retreat!");
         bus.add_event(EventSlot::once(Box::new(Epilogue)));
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }
 
@@ -198,10 +178,6 @@ impl ScriptedEvent for ChooseRoute {
             Choice::Fail => unreachable!("the demonstration's failure route never wins combat"),
         }
     }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 struct FreePrisoner {
@@ -216,10 +192,6 @@ impl ScriptedEvent for FreePrisoner {
         world.resource_mut::<Encounter>().prisoner_freed = true;
         record(world, "The prisoner is free and reveals a hidden treasure.");
     }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 struct TakeSupplies {
@@ -233,10 +205,6 @@ impl ScriptedEvent for TakeSupplies {
     fn execute(&self, _: &mut EventBus, world: &mut World) {
         world.resource_mut::<Encounter>().supplies_taken = true;
         record(world, "The caravan supplies are recovered.");
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }
 
@@ -254,10 +222,6 @@ impl ScriptedEvent for Reward {
         record(world, "All chosen objectives complete. Reward granted.");
         bus.add_event(EventSlot::once(Box::new(Epilogue)));
     }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 struct Epilogue;
@@ -265,10 +229,6 @@ impl ScriptedEvent for Epilogue {
     fn execute(&self, _: &mut EventBus, world: &mut World) {
         world.resource_mut::<Encounter>().finished = true;
         record(world, "The caravan's story ends.");
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }
 

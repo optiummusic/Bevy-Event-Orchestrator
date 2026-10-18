@@ -1,6 +1,6 @@
 //! The event bus type.
 
-use std::any::TypeId;
+use std::any::{Any, TypeId};
 
 use crate::{EventSlot, ScriptedEvent};
 use bevy::{
@@ -71,7 +71,10 @@ impl EventBus {
         self.events.retain(|slot| {
             slot.event
                 .as_ref()
-                .is_none_or(|event| event.as_any().type_id() != target)
+                .is_none_or(|event| {
+                    let any: &dyn Any = &**event; // Dereference so we don't get the TypeID of Box.
+                    any.type_id() != target
+                })
         });
     }
 

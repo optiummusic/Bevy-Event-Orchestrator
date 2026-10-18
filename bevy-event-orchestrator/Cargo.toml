@@ -15,3 +15,4 @@ include = ["src/*.rs", "examples/**", "Cargo.toml", "Cargo.lock", "README.md", "
 [dependencies]
 bevy = { version = "0.20", default-features = false }
 rand = "0.10.3"
+rand_chacha = "0.10.0"

@@ -1,12 +1,11 @@
 //! Event trait
 
-// We use Any for dynamic access.
+// Any supplies concrete type identity without boilerplate in event implementations.
 use bevy::ecs::world::World;
 
 use crate::EventBus;
 /// A condition-driven action owned by an [`EventBus`].
 ///
-/// Implement [`Self::as_any`] by returning `self` so type-based deletion works.
 /// Callbacks run synchronously. During plugin execution the bus is temporarily
 /// removed from the world: use the supplied `bus`, not `world.resource::<EventBus>()`.
 /// Do not recursively call [`EventBus::tick`] from a callback.
@@ -28,5 +27,13 @@ pub trait ScriptedEvent: std::any::Any + Send + Sync {
     #[allow(unused_variables)]
     fn is_dead(&self, bus: &EventBus, world: &World) -> bool {
         false
+    }
+
+    /// Returns a diagnostic name, defaulting to the concrete Rust type name.
+    /// Root-event RNG keys also use this name, so renaming a type or overriding
+    /// this method changes its random stream. Use distinct, stable names when
+    /// overriding it for different event types.
+    fn name(&self) -> &'static str {
+        std::any::type_name::<Self>()
     }
 }

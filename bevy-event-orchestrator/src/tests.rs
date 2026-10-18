@@ -3,12 +3,12 @@
 //! Expected public API:
 //! - EventBus::{new, add_event, delete_event, tick}
 //! - EventSlot::once(Box<dyn ScriptedEvent>)
-//! - ScriptedEvent::{execute, is_ready, is_dead, as_any}
+//! - ScriptedEvent::{execute, is_ready, is_dead}
 //!
 //! These tests assume `is_ready(&mut self, ...)`, and that actions issued during
 //! `tick()` are applied at the beginning of the following `tick()`.
 
-use std::{any::Any, time::Duration};
+use std::time::Duration;
 
 use bevy::{
     app::App,
@@ -136,7 +136,7 @@ struct CancelVictim;
 
 impl ScriptedEvent for CancelVictim {
     fn execute(&self, bus: &mut EventBus, _world: &mut World) {
-        bus.delete_event::<Victim>();
+        bus.delete_event().by_type::<Victim>();
     }
 }
 
@@ -231,7 +231,7 @@ fn delete_removes_all_matching_events_but_not_other_types() {
     bus.add_event(once(Record("a")));
     bus.add_event(once(Record("b")));
     bus.add_event(once(OtherRecord));
-    bus.delete_event::<Record>();
+    bus.delete_event().by_type::<Record>();
 
     bus.tick(&mut world);
     assert_eq!(log(&world), &["other"]);
@@ -244,7 +244,7 @@ fn queued_actions_are_applied_in_order() {
 
     // Delete existing Records, then add a new one: the new one survives.
     bus.add_event(once(Record("old")));
-    bus.delete_event::<Record>();
+    bus.delete_event().by_type::<Record>();
     bus.add_event(once(Record("new")));
 
     bus.tick(&mut world);
@@ -401,12 +401,19 @@ fn not_ready_does_not_start_cooldown() {
 
 #[test]
 fn failed_random_roll_waits_until_the_next_interval() {
-    use rand::{RngExt, SeedableRng, rngs::StdRng};
-    // Find a failure followed by success without pinning StdRng's algorithm.
+    // Find a failure then success through the public API, including stream selection.
     let seed = (0..10_000)
         .find(|&seed| {
-            let mut rng = StdRng::seed_from_u64(seed);
-            rng.random::<f32>() >= 0.5 && rng.random::<f32>() < 0.5
+            let mut world = test_world();
+            let mut bus = EventBus::with_seed(seed);
+            bus.add_event(repeating(Record("rolled"), 10.0, 0.5));
+            bus.tick(&mut world);
+            if !log(&world).is_empty() {
+                return false;
+            }
+            advance(&mut world, 10.0);
+            bus.tick(&mut world);
+            log(&world) == ["rolled"]
         })
         .expect("a seed with a failed then successful roll");
     let mut world = test_world();
@@ -447,4 +454,204 @@ fn plugin_respects_virtual_time_pause() {
     assert_eq!(log(app.world()).len(), 1);
     app.update();
     assert_eq!(log(app.world()).len(), 2);
+}
+
+#[test]
+fn handles_distinguish_instances_and_pending_cancellation() {
+    let mut bus = EventBus::with_seed(42);
+    let mut world = test_world();
+    let first = bus.add_event(once(Record("first")));
+    let second = bus.add_event(once(Record("second")));
+    assert_ne!(first, second);
+    assert!(bus.is_alive().by_id(first));
+    assert!(bus.is_alive().by_type::<Record>());
+    bus.delete_event().by_id(first);
+    assert!(!bus.is_alive().by_id(first));
+    assert!(bus.is_alive().by_id(second));
+    bus.tick(&mut world);
+    assert_eq!(log(&world), &["second"]);
+    assert!(!bus.is_alive().by_id(second));
+    assert!(!bus.is_alive().by_type::<Record>());
+}
+
+#[test]
+fn alive_queries_replay_mixed_pending_operations_in_order() {
+    let mut bus = EventBus::with_seed(42);
+    let mut world = test_world();
+    let old = bus.add_event(repeating(Record("old"), 10.0, 1.0));
+    bus.tick(&mut world);
+    bus.delete_event().by_type::<Record>();
+    let new = bus.add_event(once(Record("new")));
+    assert!(!bus.is_alive().by_id(old));
+    assert!(bus.is_alive().by_id(new));
+    assert!(bus.is_alive().by_type::<Record>());
+    bus.delete_event().by_id(new);
+    assert!(!bus.is_alive().by_type::<Record>());
+    bus.tick(&mut world);
+    assert_eq!(log(&world), &["old"]);
+}
+
+#[test]
+fn repeatable_handle_survives_execution_until_deleted() {
+    let mut bus = EventBus::with_seed(42);
+    let mut world = test_world();
+    let id = bus.add_event(repeating(Record("repeat"), 1.0, 1.0));
+    bus.tick(&mut world);
+    assert!(bus.is_alive().by_id(id));
+    bus.delete_event().by_id(id);
+    assert!(!bus.is_alive().by_id(id));
+    advance(&mut world, 1.0);
+    bus.tick(&mut world);
+    assert_eq!(log(&world), &["repeat"]);
+}
+
+#[test]
+fn death_removes_handle_and_type_membership() {
+    let mut bus = EventBus::with_seed(42);
+    let mut world = test_world();
+    let id = bus.add_event(once(AlreadyDead));
+    assert!(bus.is_alive().by_id(id));
+    bus.tick(&mut world);
+    assert!(!bus.is_alive().by_id(id));
+    assert!(!bus.is_alive().by_type::<AlreadyDead>());
+}
+
+struct CancelById(crate::EventId);
+impl ScriptedEvent for CancelById {
+    fn execute(&self, bus: &mut EventBus, _: &mut World) {
+        assert!(bus.is_alive().by_id(self.0));
+        bus.delete_event().by_id(self.0);
+        assert!(!bus.is_alive().by_id(self.0));
+    }
+}
+
+#[test]
+fn cancellation_query_changes_before_physical_removal() {
+    let mut bus = EventBus::with_seed(42);
+    let mut world = test_world();
+    let victim = bus.add_event(once(Victim));
+    bus.add_event(once(CancelById(victim)));
+    bus.tick(&mut world);
+    assert!(!bus.is_alive().by_id(victim));
+    world.resource_mut::<TestState>().iteration = 1;
+    bus.tick(&mut world);
+    assert!(log(&world).is_empty());
+}
+
+struct StreamChild;
+impl ScriptedEvent for StreamChild {
+    fn execute(&self, _: &mut EventBus, world: &mut World) {
+        world.resource_mut::<TestState>().log.push("child");
+    }
+}
+struct StreamParent;
+impl ScriptedEvent for StreamParent {
+    fn execute(&self, bus: &mut EventBus, _: &mut World) {
+        let id = bus.add_event(repeating(StreamChild, 1.0, 0.5));
+        assert!(bus.is_alive().by_id(id));
+        assert!(bus.is_alive().by_type::<StreamChild>());
+    }
+}
+
+fn stream_trace(noise: bool, child: bool) -> Vec<bool> {
+    let mut bus = EventBus::with_seed(42);
+    let mut world = test_world();
+    if noise {
+        bus.add_event(repeating(OtherRecord, 0.0, 0.5));
+    }
+    if child {
+        bus.add_event(once(StreamParent));
+    } else {
+        bus.add_event(repeating(StreamChild, 1.0, 0.5));
+    }
+    (0..100)
+        .map(|_| {
+            bus.tick(&mut world);
+            let fired = log(&world).contains(&"child");
+            world.resource_mut::<TestState>().log.clear();
+            advance(&mut world, 1.0);
+            fired
+        })
+        .collect()
+}
+
+#[test]
+fn unrelated_root_rng_draws_do_not_shift_event_stream() {
+    let trace = stream_trace(false, false);
+    assert!(trace.contains(&true) && trace.contains(&false));
+    assert_eq!(trace, stream_trace(true, false));
+}
+
+#[test]
+fn child_rng_stream_is_independent_of_unrelated_root_events() {
+    let trace = stream_trace(false, true);
+    assert!(!trace[0], "child must wait until the next tick");
+    assert!(trace.contains(&true));
+    assert_eq!(trace, stream_trace(true, true));
+}
+
+#[test]
+fn event_name_defaults_to_concrete_type_and_can_be_overridden() {
+    let event: Box<dyn ScriptedEvent> = Box::new(Record("named"));
+    assert_eq!(event.name(), std::any::type_name::<Record>());
+    struct Named;
+    impl ScriptedEvent for Named {
+        fn execute(&self, _: &mut EventBus, _: &mut World) {}
+        fn name(&self) -> &'static str {
+            "quest.named.v1"
+        }
+    }
+    let event: Box<dyn ScriptedEvent> = Box::new(Named);
+    assert_eq!(event.name(), "quest.named.v1");
+}
+
+struct CancelReadyRecord;
+impl ScriptedEvent for CancelReadyRecord {
+    fn execute(&self, bus: &mut EventBus, _: &mut World) {
+        bus.delete_event().by_type::<Record>();
+        assert!(!bus.is_alive().by_type::<Record>());
+    }
+}
+
+#[test]
+fn pending_deletion_does_not_skip_a_ready_event_in_the_current_tick() {
+    let mut bus = EventBus::with_seed(42);
+    let mut world = test_world();
+    bus.add_event(once(CancelReadyRecord));
+    bus.add_event(repeating(Record("still runs"), 0.0, 1.0));
+    bus.tick(&mut world);
+    assert_eq!(log(&world), &["still runs"]);
+    assert!(!bus.is_alive().by_type::<Record>());
+    bus.tick(&mut world);
+    assert_eq!(log(&world), &["still runs"]);
+}
+
+struct CheckOwnMembership {
+    repeatable: bool,
+}
+impl ScriptedEvent for CheckOwnMembership {
+    fn is_ready(&mut self, bus: &EventBus, _: &World) -> bool {
+        // The payload has been taken out, but cached type identity remains.
+        assert!(bus.is_alive().by_type::<Self>());
+        true
+    }
+    fn execute(&self, bus: &mut EventBus, _: &mut World) {
+        assert_eq!(bus.is_alive().by_type::<Self>(), self.repeatable);
+    }
+}
+
+#[test]
+fn membership_during_callbacks_uses_cached_concrete_type() {
+    for repeatable in [false, true] {
+        let mut bus = EventBus::with_seed(42);
+        let mut world = test_world();
+        let event = CheckOwnMembership { repeatable };
+        let slot = if repeatable {
+            repeating(event, 1.0, 1.0)
+        } else {
+            once(event)
+        };
+        bus.add_event(slot);
+        bus.tick(&mut world);
+    }
 }

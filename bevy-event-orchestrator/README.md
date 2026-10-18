@@ -39,8 +39,10 @@ EnterCanyon — wait for the player to enter
 
 Both successful routes reach the epilogue through `Reward`. Victory and failure
 are mutually exclusive: victory requires time strictly before the deadline,
-while failure requires the deadline to have elapsed. The losing watcher and
-reinforcements retire through `is_dead()` when the battle ends.
+while failure requires the deadline to have elapsed. Victory cancels the timeout and reinforcements by their individual `EventId`s.
+Failure cancels its reinforcements. `is_dead()` guards obsolete events during
+the current tick, before deferred deletion is applied. The example also queries
+pending membership with `is_alive().by_id(id)` and checks cleanup by type.
 
 The rescue route demonstrates a **join**: freeing the prisoner and recovering
 supplies run independently, and the reward waits for both world conditions.
@@ -84,7 +86,6 @@ caravan scenario. The reward is created by the quest event, not pre-registered
 by the application:
 
 ```rust
-use std::any::Any;
 use bevy::prelude::*;
 use bevy_event_orchestrator::{EventBus, EventBusPlugin, EventSlot, ScriptedEvent};
 
@@ -140,8 +141,8 @@ Every tick checks events in this order:
 1. `is_dead()` removes the event permanently when true, even during cooldown.
 2. An active cooldown skips the remaining checks.
 3. `is_ready()` must return true before a probability check is made.
-4. Repeatable events draw from the bus's shared RNG. Every draw starts a new
-   cooldown, including a failed draw.
+4. Repeatable events use their own ChaCha8 RNG stream. Every eligible attempt
+   starts a cooldown, including a failed attempt. Chance 1 skips the RNG draw.
 5. Successful events execute; one-shot events are removed and repeatable events
    remain registered.
 
@@ -158,21 +159,85 @@ Pausing time does not disable the bus: immediately eligible events can still
 execute. Add your own readiness condition when the whole scenario must pause.
 Manual `World` users must insert and advance a `Time` resource themselves.
 
-`EventBus::new()` uses random initialization. `EventBus::with_seed(seed)` gives
-repeatable draws for identical event registration, time, world state, and calls
-within the same RNG algorithm version. `StdRng` does not promise the same stream
-across library versions. Adding or removing events can change later draws.
+`EventBus::new()` chooses a random bus seed. `EventBus::with_seed(seed)` derives
+an individual `ChaCha8Rng` stream for each repeatable event:
+
+- Root keys depend on `ScriptedEvent::name()` and the registration number for
+  that concrete event type. Adding a different root type does not shift the
+  existing type's stream; adding an earlier root of the same type does.
+- Child keys depend on the parent key and the child's position in that
+  `execute()` call. Unrelated chains do not consume each other's random draws.
+- `name()` defaults to the concrete Rust type name. Override it with a distinct,
+  stable string to decouple root keys from a type/module rename.
+
+The same seed, keys, and eligible checks reproduce draws with the same algorithm
+and sampling behavior. World mutations and timing can still change readiness,
+so separate RNG streams do not make the entire simulation order-independent.
+
+**Current limitation:** each execution resets the parent's child counter.
+Children created at the same position on successive executions of a repeatable
+parent reuse a stream from its beginning. Different types overriding `name()`
+with the same value can also derive matching root keys. There is currently no
+public explicit-key setter. Do not assume every registration has a unique stream
+or that arbitrary refactors preserve replays.
+
+## Handles, cancellation, and membership
+
+`add_event(slot)` returns an `EventId` immediately. Store it when you need to
+cancel one registration without affecting other events of the same type:
+
+```rust
+use bevy::prelude::*;
+use bevy_event_orchestrator::{EventBus, EventSlot, ScriptedEvent};
+
+struct Patrol;
+impl ScriptedEvent for Patrol {
+    fn execute(&self, _: &mut EventBus, _: &mut World) {}
+}
+
+let mut bus = EventBus::with_seed(42);
+let first = bus.add_event(EventSlot::repeatable(Box::new(Patrol), 5.0));
+let second = bus.add_event(EventSlot::repeatable(Box::new(Patrol), 5.0));
+assert!(bus.is_alive().by_id(first)); // Includes pending additions.
+
+bus.delete_event().by_id(first);
+assert!(!bus.is_alive().by_id(first)); // Includes pending deletions too.
+assert!(bus.is_alive().by_id(second));
+assert!(bus.is_alive().by_type::<Patrol>());
+
+bus.delete_event().by_type::<Patrol>(); // Cancel every Patrol registration.
+assert!(!bus.is_alive().by_type::<Patrol>());
+```
+
+IDs belong to their originating bus; another bus can issue an equal ID. They are
+registration handles, not persistent save-file identifiers. `EventSlot` has no
+`Default`: construct it with `once`, `repeatable`, or `repeatable_chance`.
+Implementing `ScriptedEvent` requires only `execute`; `as_any` is not needed.
+
+`is_alive()` replays pending operations in call order. It reports projected
+membership, not whether `is_ready()` or `is_dead()` will allow execution.
+During `execute()`, a one-shot event is already removed; a repeatable event is
+still registered unless a pending deletion hides it from the query.
 
 ## Queue and scheduling
 
-`add_event()` and `delete_event::<T>()` enqueue operations. They are applied in
-call order at the beginning of the next bus tick. Deletion removes every event
-of that concrete type. Operations requested during callbacks apply on the next
-tick; changes to world resources and entities are immediately visible.
+Additions and deletions are applied in call order at the beginning of the next
+bus tick. A deletion queued during a callback immediately affects `is_alive()`,
+but does **not** prevent an event later in the current tick from executing.
+Use an `is_dead()` condition tied to world state when immediate cancellation is
+required. World mutations are immediately visible.
 
 Use `.before(EventBusSet)` or `.after(EventBusSet)` on your `Update` systems to
 control their position relative to the bus. Import `EventBusSet` from this crate
 and Bevy's prelude for the scheduling methods.
+
+## Migrating from the earlier API
+
+- Remove `as_any()` implementations and unused `Any` imports.
+- Replace `delete_event::<T>()` with `delete_event().by_type::<T>()`.
+- Retain the ID returned by `add_event()` for `delete_event().by_id(id)`.
+- Use `new()` or `with_seed()`; the former `with_rng(StdRng)` is gone.
+- Seeded outcomes differ from the previous shared-`StdRng` implementation.
 
 ## Scope and limitations
 
@@ -184,7 +249,7 @@ and Bevy's prelude for the scheduling methods.
   supplied `bus` parameter instead of fetching `EventBus` from the world.
 - Do not recursively call `tick()` from callbacks. Callback panics propagate;
   recovery after a callback panic is not supported.
-- There are no event handles, priorities, persistence, or network replay guarantees
+- There are no priorities, persistence, or network replay guarantees
   in this version. The API may evolve before 1.0.
 
 ## Development

@@ -1,20 +1,29 @@
 //! The event bus type.
 
-use std::any::{Any, TypeId};
+use std::any::TypeId;
 
 use crate::{EventSlot, ScriptedEvent};
 use bevy::{
     ecs::{resource::Resource, world::World},
     prelude::Time,
 };
-use rand::{RngExt, SeedableRng, rngs::StdRng};
+use rand::{RngExt, SeedableRng};
+use rand_chacha::ChaCha8Rng;
+
+/// Identifies one registration within its originating bus.
+///
+/// IDs are assigned immediately by [`EventBus::add_event`]. They are not global:
+/// separate buses can issue equal IDs. The default zero ID is never assigned.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub struct EventId(u64);
 
 enum EventBusActions {
-    Add(EventSlot),
-    Delete(TypeId),
+    Add(Box<EventSlot>),
+    DeleteType(TypeId),
+    DeleteId(EventId),
 }
 
-/// Owns scripted events, deferred queue operations, and a shared random generator.
+/// Owns scripted events, deferred operations, and the seed for per-event RNG streams.
 ///
 /// Events are scanned linearly each tick. Removal may reorder remaining events;
 /// insertion order is not an execution-order guarantee. Prefer separate ticks or
@@ -22,8 +31,29 @@ enum EventBusActions {
 #[derive(Resource)]
 pub struct EventBus {
     events: Vec<EventSlot>,
-    action: Vec<EventBusActions>,
-    rng: StdRng,
+    pending: Vec<EventBusActions>,
+    seed: u64,
+    next_id: u64,
+    current_key: Option<u64>,
+    child_n: u32,
+    root_counts: bevy::platform::collections::HashMap<TypeId, u32>,
+}
+
+/// Computes the 64-bit FNV-1a hash used when deriving event stream keys.
+/// This is a non-cryptographic hash; collisions are possible.
+pub fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut h = 0xcbf29ce484222325u64;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+fn child_key(parent: u64, n: u32) -> u64 {
+    let mut b = [0u8; 12];
+    b[..8].copy_from_slice(&parent.to_le_bytes());
+    b[8..].copy_from_slice(&n.to_le_bytes());
+    fnv1a(&b)
 }
 
 impl Default for EventBus {
@@ -33,66 +63,81 @@ impl Default for EventBus {
 }
 
 impl EventBus {
-    /// Creates an empty bus with an owned random generator.
-    pub fn with_rng(rng: StdRng) -> Self {
+    /// Creates an empty bus with a random seed.
+    pub fn new() -> Self {
+        Self::with_seed(rand::random())
+    }
+
+    /// Creates an empty bus with reproducible per-event ChaCha8 streams.
+    /// Root keys depend on event names and registration counts per concrete type.
+    /// Child keys depend on the parent key and child position within `execute`.
+    /// Repeated executions of a parent currently reuse child stream keys.
+    pub fn with_seed(seed: u64) -> Self {
         Self {
             events: Vec::new(),
-            action: Vec::new(),
-            rng,
+            pending: Vec::new(),
+            seed,
+            next_id: 1,
+            current_key: None,
+            child_n: 0,
+            root_counts: Default::default(),
         }
     }
-    /// Creates an empty bus with a randomly initialized generator.
-    pub fn new() -> Self {
-        Self::with_rng(rand::make_rng())
+
+    /// Queues an event; it is inserted at the start of the next tick.
+    /// The id is valid immediately.
+    pub fn add_event(&mut self, mut slot: EventSlot) -> EventId {
+        let id = EventId(self.next_id);
+        self.next_id += 1;
+        slot.id = id;
+
+        slot.key = match (slot.explicit_key, self.current_key) {
+            (Some(k), _) => k,
+            (None, Some(parent)) => {
+                let n = self.child_n;
+                self.child_n += 1;
+                child_key(parent, n)
+            }
+            (None, None) => {
+                let tid = slot.type_id.expect("slot built without type id");
+                let ev = slot.event.as_ref().expect("slot without event");
+                let c = self.root_counts.entry(tid).or_insert(0);
+                *c += 1;
+                child_key(fnv1a(ev.name().as_bytes()), *c)
+            }
+        };
+
+        if slot.repeat.is_some() {
+            let mut rng = ChaCha8Rng::seed_from_u64(self.seed);
+            rng.set_stream(slot.key);
+            slot.rng = Some(rng);
+        }
+        self.pending.push(EventBusActions::Add(Box::new(slot)));
+        id
     }
 
-    /// Reproduces results for the same calls within the same RNG algorithm version.
-    /// `StdRng` does not guarantee identical sequences across library versions.
-    pub fn with_seed(seed: u64) -> Self {
-        Self::with_rng(StdRng::seed_from_u64(seed))
-    }
-
-    /// Queues an event for insertion at the beginning of the next tick.
-    pub fn add_event(&mut self, slot: EventSlot) {
-        self.action.push(EventBusActions::Add(slot));
-    }
-
-    fn add_event_inner(&mut self, slot: EventSlot) {
-        self.events.push(slot);
-    }
-
-    /// Queues removal of all events of concrete type `T`, including repeatable ones.
+    /// Selects deletion by [`DeleteEvent::by_id`] or [`DeleteEvent::by_type`].
     /// Operations are applied in call order at the start of the next tick.
-    pub fn delete_event<T: ScriptedEvent>(&mut self) {
-        self.action.push(EventBusActions::Delete(TypeId::of::<T>()));
+    pub fn delete_event(&mut self) -> DeleteEvent<'_> {
+        DeleteEvent { bus: self }
     }
-
-    fn delete_event_inner(&mut self, target: TypeId) {
-        self.events.retain(|slot| {
-            slot.event
-                .as_ref()
-                .is_none_or(|event| {
-                    let any: &dyn Any = &**event; // Dereference so we don't get the TypeID of Box.
-                    any.type_id() != target
-                })
-        });
+    /// Queries membership after replaying queued additions and deletions.
+    /// This does not evaluate readiness, death predicates, or future execution.
+    pub fn is_alive(&self) -> IsAliveEvent<'_> {
+        IsAliveEvent { bus: self }
     }
 
     #[inline]
     fn check_action(&mut self) {
-        if self.action.is_empty() {
+        if self.pending.is_empty() {
             return;
         }
 
-        let actions = std::mem::take(&mut self.action);
-        for act in actions {
+        for act in std::mem::take(&mut self.pending) {
             match act {
-                EventBusActions::Add(event_slot) => {
-                    self.add_event_inner(event_slot);
-                }
-                EventBusActions::Delete(t) => {
-                    self.delete_event_inner(t);
-                }
+                EventBusActions::Add(s) => self.events.push(*s),
+                EventBusActions::DeleteId(id) => self.events.retain(|s| s.id != id),
+                EventBusActions::DeleteType(t) => self.events.retain(|s| s.type_id != Some(t)),
             }
         }
     }
@@ -123,26 +168,116 @@ impl EventBus {
                 continue;
             }
 
-            let cooldown_elapsed = self.events[i]
+            let cooled = self.events[i]
                 .repeat
                 .as_ref()
-                .is_none_or(|repeat| repeat.cooldown_elapsed(now));
-            if !cooldown_elapsed || !ev.is_ready(self, world) {
+                .is_none_or(|r| r.cooldown_elapsed(now));
+            if !cooled || !ev.is_ready(self, world) {
                 self.events[i].event = Some(ev);
                 i += 1;
                 continue;
             }
 
-            if let Some(repeat) = self.events[i].repeat.as_mut() {
-                if repeat.roll(now, self.rng.random::<f32>()) {
-                    ev.execute(self, world);
+            let key = self.events[i].key;
+            if self.events[i].repeat.is_some() {
+                let slot = &mut self.events[i];
+                let repeat = slot.repeat.as_mut().unwrap();
+                // Don't spend a random draw when the outcome is certain.
+                let r = if repeat.chance() >= 1.0 {
+                    0.0
+                } else {
+                    slot.rng.as_mut().unwrap().random::<f32>()
+                };
+                let fire = repeat.roll(now, r);
+                if fire {
+                    self.run(&*ev, key, world);
                 }
                 self.events[i].event = Some(ev);
                 i += 1;
             } else {
                 self.events.swap_remove(i);
-                ev.execute(self, world);
+                self.run(&*ev, key, world);
             }
         }
+    }
+
+    fn run(&mut self, ev: &dyn ScriptedEvent, key: u64, world: &mut World) {
+        self.current_key = Some(key);
+        self.child_n = 0;
+        ev.execute(self, world);
+        self.current_key = None;
+    }
+}
+
+/// A deferred deletion request created by [`EventBus::delete_event`].
+/// Call `by_id` or `by_type` to enqueue the operation.
+pub struct DeleteEvent<'a> {
+    bus: &'a mut EventBus,
+}
+impl DeleteEvent<'_> {
+    /// Queues removal of a single registration. Unknown IDs are harmless.
+    pub fn by_id(self, id: EventId) {
+        self.bus.pending.push(EventBusActions::DeleteId(id));
+    }
+    /// Queues removal of all registrations of concrete type `T`.
+    pub fn by_type<T: ScriptedEvent>(self) {
+        self.bus
+            .pending
+            .push(EventBusActions::DeleteType(TypeId::of::<T>()));
+    }
+}
+
+/// A view of event membership including pending operations in queue order.
+///
+/// A pending deletion is reported immediately, even though the event can still
+/// run during the current tick. During `execute`, a one-shot event has already
+/// been removed, while a repeatable event is still registered.
+pub struct IsAliveEvent<'a> {
+    bus: &'a EventBus,
+}
+impl IsAliveEvent<'_> {
+    /// Returns whether this registration survives the pending operations.
+    pub fn by_id(self, id: EventId) -> bool {
+        let bus = self.bus;
+        let mut alive = false;
+        let mut ty = None;
+        if let Some(s) = bus.events.iter().find(|s| s.id == id) {
+            alive = true;
+            ty = s.event_type_id();
+        }
+        for a in &bus.pending {
+            match a {
+                EventBusActions::Add(s) if s.id == id => {
+                    alive = true;
+                    ty = s.event_type_id();
+                }
+                EventBusActions::DeleteId(d) if *d == id => alive = false,
+                EventBusActions::DeleteType(t) if ty == Some(*t) => alive = false,
+                _ => {}
+            }
+        }
+        alive
+    }
+
+    /// Returns whether any registration of `T` survives pending operations.
+    /// This query allocates temporary storage for matching IDs.
+    pub fn by_type<T: ScriptedEvent>(self) -> bool {
+        let bus = self.bus;
+        let t = TypeId::of::<T>();
+        let mut ids: Vec<EventId> = bus
+            .events
+            .iter()
+            .filter(|s| s.event_type_id() == Some(t))
+            .map(|s| s.id)
+            .collect();
+        for a in &bus.pending {
+            match a {
+                EventBusActions::Add(s) if s.event_type_id() == Some(t) => ids.push(s.id),
+                EventBusActions::DeleteType(d) if *d == t => ids.clear(),
+                EventBusActions::DeleteId(d) => ids.retain(|i| i != d),
+                _ => {}
+            }
+        }
+        !ids.is_empty()
     }
 }

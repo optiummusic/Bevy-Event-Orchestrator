@@ -38,7 +38,7 @@ allowlist in `Cargo.toml` controls the published files.
 4. Authenticate using `cargo login` in your own terminal if needed. Never put a
    registry token in source, documentation, or CI logs.
 5. Run `cargo publish --locked --dry-run`, then `cargo publish --locked`.
-6. Tag the released commit `v0.1.0` (or the selected version) and push the commit
+6. Tag the released commit `v0.1.1` (or the selected version) and push the commit
    and tag. Create the repository release from the changelog.
 7. Check the crates.io listing and the docs.rs build after publication.
 

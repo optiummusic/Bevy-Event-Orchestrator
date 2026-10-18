@@ -1,5 +1,4 @@
 //! Run with `cargo run --example basic` (no window or renderer required).
-use std::any::Any;
 
 use bevy::prelude::*;
 use bevy_event_orchestrator::{EventBus, EventBusPlugin, EventSlot, ScriptedEvent};

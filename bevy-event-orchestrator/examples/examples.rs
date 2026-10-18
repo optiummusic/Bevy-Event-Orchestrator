@@ -1,9 +1,11 @@
 //! A branching encounter built by events registering their successors.
 //! Run: cargo run --example examples -- rescue|leave|fail
-use std::{any::Any, time::Duration};
+use std::time::Duration;
 
 use bevy::{prelude::*, time::TimeUpdateStrategy};
-use bevy_event_orchestrator::{EventBus, EventBusPlugin, EventBusSet, EventSlot, ScriptedEvent};
+use bevy_event_orchestrator::{
+    EventBus, EventBusPlugin, EventBusSet, EventId, EventSlot, ScriptedEvent,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Choice {
@@ -41,7 +43,6 @@ fn record(world: &mut World, message: &'static str) {
     println!("[{time:>4.0}s] {message}");
 }
 
-// Each event implements as_any explicitly: no custom framework or helper macro.
 struct EnterCanyon;
 impl ScriptedEvent for EnterCanyon {
     fn is_ready(&mut self, _: &EventBus, world: &World) -> bool {
@@ -76,13 +77,20 @@ impl ScriptedEvent for Ambush {
         );
 
         // Fan out: a repeating pressure source and two competing outcomes.
-        bus.add_event(EventSlot::repeatable_chance(
+        let reinforcements = bus.add_event(EventSlot::repeatable_chance(
             Box::new(Reinforcements),
             2.0,
             0.5,
         ));
-        bus.add_event(EventSlot::once(Box::new(BattleWon { deadline })));
-        bus.add_event(EventSlot::once(Box::new(CaravanLost { deadline })));
+        let timeout = bus.add_event(EventSlot::once(Box::new(CaravanLost {
+            deadline,
+            reinforcements,
+        })));
+        bus.add_event(EventSlot::once(Box::new(BattleWon {
+            deadline,
+            reinforcements,
+            timeout,
+        })));
     }
 }
 
@@ -107,6 +115,8 @@ impl ScriptedEvent for Reinforcements {
 
 struct BattleWon {
     deadline: f64,
+    reinforcements: EventId,
+    timeout: EventId,
 }
 impl ScriptedEvent for BattleWon {
     fn is_dead(&self, _: &EventBus, world: &World) -> bool {
@@ -122,12 +132,17 @@ impl ScriptedEvent for BattleWon {
         world.resource_mut::<Encounter>().active = false;
         record(world, "Battle won. A prisoner calls from the bandit camp.");
         bus.add_event(EventSlot::once(Box::new(ChooseRoute)));
-        // Reinforcements and the losing outcome retire through is_dead().
+        // Cancel only this encounter's registrations, not every event of these types.
+        bus.delete_event().by_id(self.reinforcements);
+        bus.delete_event().by_id(self.timeout);
+        assert!(!bus.is_alive().by_id(self.timeout));
+        // is_dead() still guards callbacks before deferred deletion is applied.
     }
 }
 
 struct CaravanLost {
     deadline: f64,
+    reinforcements: EventId,
 }
 impl ScriptedEvent for CaravanLost {
     fn is_dead(&self, _: &EventBus, world: &World) -> bool {
@@ -142,6 +157,7 @@ impl ScriptedEvent for CaravanLost {
         let mut encounter = world.resource_mut::<Encounter>();
         encounter.active = false;
         encounter.failed = true;
+        bus.delete_event().by_id(self.reinforcements);
         record(world, "Too late. The caravan is lost; retreat!");
         bus.add_event(EventSlot::once(Box::new(Epilogue)));
     }
@@ -269,14 +285,21 @@ fn run(choice: Choice) {
         .set_max_delta(Duration::from_secs(1));
 
     // The ONLY initial registration. Every other event comes from execute().
-    app.world_mut()
+    let entry = app
+        .world_mut()
         .resource_mut::<EventBus>()
         .add_event(EventSlot::once(Box::new(EnterCanyon)));
+    // A queued registration is visible even before its first tick.
+    assert!(app.world().resource::<EventBus>().is_alive().by_id(entry));
 
     // No sleeping, rendering, or wall-clock dependence; terminate even on a broken chain.
     for _ in 0..40 {
         app.update();
     }
+    let bus = app.world().resource::<EventBus>();
+    assert!(!bus.is_alive().by_id(entry));
+    assert!(!bus.is_alive().by_type::<Reinforcements>());
+    assert!(!bus.is_alive().by_type::<CaravanLost>());
     let encounter = app.world().resource::<Encounter>();
     assert!(
         encounter.finished,

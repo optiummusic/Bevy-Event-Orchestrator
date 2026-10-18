@@ -96,7 +96,7 @@ struct CompleteQuest;
 impl ScriptedEvent for CompleteQuest {
     fn execute(&self, bus: &mut EventBus, _world: &mut World) {
         // Choose the next event here, using the current world state if needed.
-        bus.add_event(EventSlot::once(Box::new(GrantReward { amount: 150 })));
+        bus.add_event(EventSlot::once(GrantReward { amount: 150 }));
     }
 }
 
@@ -114,7 +114,7 @@ app.add_plugins(MinimalPlugins)
     .init_resource::<Gold>();
 
 app.world_mut().resource_mut::<EventBus>()
-    .add_event(EventSlot::once(Box::new(CompleteQuest)));
+    .add_event(EventSlot::once(CompleteQuest));
 
 app.update(); // CompleteQuest runs and queues GrantReward.
 assert_eq!(app.world().resource::<Gold>().0, 0);
@@ -131,9 +131,11 @@ execute in the same tick.
 
 ## Repeated events
 
-Wrap your event with `EventSlot::repeatable(Box::new(event), 10.0)` to attempt
+Pass events by value to all three constructors; `EventSlot` handles boxing internally.
+
+Wrap your event with `EventSlot::repeatable(event, 10.0)` to attempt
 execution every ten game-time seconds, or
-`EventSlot::repeatable_chance(Box::new(event), 10.0, 0.25)` for a 25% chance per
+`EventSlot::repeatable_chance(event, 10.0, 0.25)` for a 25% chance per
 eligible attempt. The first attempt is eligible immediately.
 
 Every tick checks events in this order:
@@ -196,8 +198,8 @@ impl ScriptedEvent for Patrol {
 }
 
 let mut bus = EventBus::with_seed(42);
-let first = bus.add_event(EventSlot::repeatable(Box::new(Patrol), 5.0));
-let second = bus.add_event(EventSlot::repeatable(Box::new(Patrol), 5.0));
+let first = bus.add_event(EventSlot::repeatable(Patrol, 5.0));
+let second = bus.add_event(EventSlot::repeatable(Patrol, 5.0));
 assert!(bus.is_alive().by_id(first)); // Includes pending additions.
 
 bus.delete_event().by_id(first);
@@ -232,6 +234,8 @@ control their position relative to the bus. Import `EventBusSet` from this crate
 and Bevy's prelude for the scheduling methods.
 
 ## Migrating from the earlier API
+
+- Pass events directly: `EventSlot::once(MyEvent)` instead of wrapping them in `Box::new`.
 
 - Remove `as_any()` implementations and unused `Any` imports.
 - Replace `delete_event::<T>()` with `delete_event().by_type::<T>()`.

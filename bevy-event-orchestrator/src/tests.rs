@@ -2,7 +2,7 @@
 //!
 //! Expected public API:
 //! - EventBus::{new, add_event, delete_event, tick}
-//! - EventSlot::once(Box<dyn ScriptedEvent>)
+//! - EventSlot::once(impl ScriptedEvent)
 //! - ScriptedEvent::{execute, is_ready, is_dead}
 //!
 //! These tests assume `is_ready(&mut self, ...)`, and that actions issued during
@@ -36,7 +36,7 @@ fn log(world: &World) -> &[&'static str] {
 }
 
 fn once<T: ScriptedEvent>(event: T) -> EventSlot {
-    EventSlot::once(Box::new(event))
+    EventSlot::once(event)
 }
 
 // A basic event that immediately executes and records its label.
@@ -293,14 +293,14 @@ fn advance(world: &mut World, seconds: f64) {
 }
 
 fn repeating(event: impl ScriptedEvent, cooldown: f64, chance: f32) -> EventSlot {
-    EventSlot::repeatable_chance(Box::new(event), cooldown, chance)
+    EventSlot::repeatable_chance(event, cooldown, chance)
 }
 
 #[test]
 fn repeatable_runs_again_only_after_cooldown() {
     let mut world = test_world();
     let mut bus = EventBus::with_seed(42);
-    bus.add_event(EventSlot::repeatable(Box::new(Record("repeat")), 10.0));
+    bus.add_event(EventSlot::repeatable(Record("repeat"), 10.0));
     bus.tick(&mut world);
     advance(&mut world, 9.0);
     bus.tick(&mut world);
@@ -441,7 +441,7 @@ fn plugin_respects_virtual_time_pause() {
         .set_max_delta(Duration::from_secs(1));
     app.world_mut()
         .resource_mut::<EventBus>()
-        .add_event(EventSlot::repeatable(Box::new(Record("virtual")), 2.0));
+        .add_event(EventSlot::repeatable(Record("virtual"), 2.0));
     app.update();
     assert_eq!(log(app.world()).len(), 1);
     app.world_mut().resource_mut::<Time<Virtual>>().pause();

@@ -56,7 +56,8 @@ impl Repeatable {
 /// during callbacks so they can access the bus without a borrow conflict.
 ///
 /// Construct slots with [`Self::once`], [`Self::repeatable`], or
-/// [`Self::repeatable_chance`]. Empty slots are not part of the public API.
+/// [`Self::repeatable_chance`]. Pass the event by value; constructors box it internally.
+/// Empty slots are not part of the public API.
 ///
 /// ```compile_fail
 /// use bevy_event_orchestrator::EventSlot;
@@ -73,14 +74,11 @@ pub struct EventSlot {
 }
 
 impl EventSlot {
-    fn build(event: Box<dyn ScriptedEvent>, repeat: Option<Repeatable>) -> Self {
-        // Compute before moving the box. The deref gives the event's TypeId, not Box's.
-        let type_id = {
-            let any: &dyn std::any::Any = &*event;
-            any.type_id()
-        };
+    fn build<T: ScriptedEvent>(event: T, repeat: Option<Repeatable>) -> Self {
+        // Capture the concrete type before erasing it behind the trait object.
+        let type_id = std::any::TypeId::of::<T>();
         Self {
-            event: Some(event),
+            event: Some(Box::new(event)),
             repeat,
             type_id: Some(type_id),
             id: EventId::default(),
@@ -95,22 +93,18 @@ impl EventSlot {
     }
 
     /// Repeats when ready, with at most one execution per cooldown interval.
-    pub fn repeatable(event: Box<dyn ScriptedEvent>, cooldown_secs: f64) -> Self {
+    pub fn repeatable(event: impl ScriptedEvent, cooldown_secs: f64) -> Self {
         Self::build(event, Some(Repeatable::new(cooldown_secs)))
     }
 
     /// Uses a per-event random stream for probability checks when ready.
     /// Every eligible check restarts the cooldown, including failed checks.
-    pub fn repeatable_chance(
-        event: Box<dyn ScriptedEvent>,
-        cooldown_secs: f64,
-        chance: f32,
-    ) -> Self {
+    pub fn repeatable_chance(event: impl ScriptedEvent, cooldown_secs: f64, chance: f32) -> Self {
         Self::build(event, Some(Repeatable::with_chance(cooldown_secs, chance)))
     }
 
     /// Executes once when ready, then removes the event.
-    pub fn once(event: Box<dyn ScriptedEvent>) -> Self {
+    pub fn once(event: impl ScriptedEvent) -> Self {
         Self::build(event, None)
     }
 }

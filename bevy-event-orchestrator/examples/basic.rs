@@ -23,7 +23,7 @@ fn main() {
 
     app.world_mut()
         .resource_mut::<EventBus>()
-        .add_event(EventSlot::once(Box::new(AwardPoint)));
+        .add_event(EventSlot::once(AwardPoint));
 
     app.update();
     assert_eq!(app.world().resource::<Score>().0, 1);

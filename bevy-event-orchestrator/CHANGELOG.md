@@ -2,6 +2,8 @@
 
 ## 0.1.1 — Unreleased
 
+- Accept concrete events by value in all `EventSlot` constructors and box them internally.
+
 - Remove the required `as_any()` method; cache concrete event type identity.
 - Return `EventId` from registration; support deletion by ID or type through
   `delete_event().by_id(id)` and `delete_event().by_type::<T>()`.

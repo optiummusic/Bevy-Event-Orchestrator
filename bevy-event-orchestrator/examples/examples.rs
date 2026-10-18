@@ -52,9 +52,9 @@ impl ScriptedEvent for EnterCanyon {
     fn execute(&self, bus: &mut EventBus, world: &mut World) {
         record(world, "Entered the canyon. The scout spots an ambush.");
         // Carry a deadline in the successor itself; no global stage switch.
-        bus.add_event(EventSlot::once(Box::new(Ambush {
+        bus.add_event(EventSlot::once(Ambush {
             at: now(world) + 2.0,
-        })));
+        }));
     }
 }
 
@@ -77,20 +77,16 @@ impl ScriptedEvent for Ambush {
         );
 
         // Fan out: a repeating pressure source and two competing outcomes.
-        let reinforcements = bus.add_event(EventSlot::repeatable_chance(
-            Box::new(Reinforcements),
-            2.0,
-            0.5,
-        ));
-        let timeout = bus.add_event(EventSlot::once(Box::new(CaravanLost {
+        let reinforcements = bus.add_event(EventSlot::repeatable_chance(Reinforcements, 2.0, 0.5));
+        let timeout = bus.add_event(EventSlot::once(CaravanLost {
             deadline,
             reinforcements,
-        })));
-        bus.add_event(EventSlot::once(Box::new(BattleWon {
+        }));
+        bus.add_event(EventSlot::once(BattleWon {
             deadline,
             reinforcements,
             timeout,
-        })));
+        }));
     }
 }
 
@@ -131,7 +127,7 @@ impl ScriptedEvent for BattleWon {
     fn execute(&self, bus: &mut EventBus, world: &mut World) {
         world.resource_mut::<Encounter>().active = false;
         record(world, "Battle won. A prisoner calls from the bandit camp.");
-        bus.add_event(EventSlot::once(Box::new(ChooseRoute)));
+        bus.add_event(EventSlot::once(ChooseRoute));
         // Cancel only this encounter's registrations, not every event of these types.
         bus.delete_event().by_id(self.reinforcements);
         bus.delete_event().by_id(self.timeout);
@@ -159,7 +155,7 @@ impl ScriptedEvent for CaravanLost {
         encounter.failed = true;
         bus.delete_event().by_id(self.reinforcements);
         record(world, "Too late. The caravan is lost; retreat!");
-        bus.add_event(EventSlot::once(Box::new(Epilogue)));
+        bus.add_event(EventSlot::once(Epilogue));
     }
 }
 
@@ -173,23 +169,23 @@ impl ScriptedEvent for ChooseRoute {
                     "You choose to rescue the prisoner and recover supplies.",
                 );
                 // Fan out into independent tasks, then join their world conditions.
-                bus.add_event(EventSlot::once(Box::new(FreePrisoner {
+                bus.add_event(EventSlot::once(FreePrisoner {
                     at: now(world) + 3.0,
-                })));
-                bus.add_event(EventSlot::once(Box::new(TakeSupplies {
+                }));
+                bus.add_event(EventSlot::once(TakeSupplies {
                     at: now(world) + 1.0,
-                })));
-                bus.add_event(EventSlot::once(Box::new(Reward { rescue: true })));
+                }));
+                bus.add_event(EventSlot::once(Reward { rescue: true }));
             }
             Choice::Leave => {
                 record(
                     world,
                     "You choose the supplies and leave the prisoner behind.",
                 );
-                bus.add_event(EventSlot::once(Box::new(TakeSupplies {
+                bus.add_event(EventSlot::once(TakeSupplies {
                     at: now(world) + 1.0,
-                })));
-                bus.add_event(EventSlot::once(Box::new(Reward { rescue: false })));
+                }));
+                bus.add_event(EventSlot::once(Reward { rescue: false }));
             }
             Choice::Fail => unreachable!("the demonstration's failure route never wins combat"),
         }
@@ -236,7 +232,7 @@ impl ScriptedEvent for Reward {
     fn execute(&self, bus: &mut EventBus, world: &mut World) {
         world.resource_mut::<Encounter>().gold += if self.rescue { 150 } else { 50 };
         record(world, "All chosen objectives complete. Reward granted.");
-        bus.add_event(EventSlot::once(Box::new(Epilogue)));
+        bus.add_event(EventSlot::once(Epilogue));
     }
 }
 
@@ -288,7 +284,7 @@ fn run(choice: Choice) {
     let entry = app
         .world_mut()
         .resource_mut::<EventBus>()
-        .add_event(EventSlot::once(Box::new(EnterCanyon)));
+        .add_event(EventSlot::once(EnterCanyon));
     // A queued registration is visible even before its first tick.
     assert!(app.world().resource::<EventBus>().is_alive().by_id(entry));
 
